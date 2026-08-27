@@ -1,0 +1,113 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# voltride-orders orchestrates checkout across four sibling repos and holds
+# local Go structs for their wire formats in clients.go. Go decodes missing
+# or renamed JSON keys SILENTLY as zero values — no compiler or runtime
+# error spans the repo boundary, so contract drift is only ever caught by
+# review.
+
+language: "en-US"
+
+tone_instructions: >-
+  Prioritize cross-repo compatibility over style. When a contract this
+  service produces or decodes changes, name every affected repository and
+  file and the runtime symptom. Never rate a contract change low risk
+  because the diff is small.
+
+reviews:
+  profile: "assertive"
+  high_level_summary: true
+  request_changes_workflow: true
+
+  path_instructions:
+    - path: "**"
+      instructions: >-
+        Treat ANY change to a wire-format element this repo produces — a
+        JSON field name, field type or unit, endpoint path or method, status
+        code, or the payload POSTed to notifications — as a BREAKING CHANGE
+        for the linked repositories, and enumerate every consumer
+        exhaustively. The order response and its 409/422 error bodies are
+        decoded by coderabbit-demo/voltride-frontend (src/api/orders.ts).
+        The order-confirmation payload must exactly match the strict
+        Pydantic OrderConfirmationRequest in
+        coderabbit-demo/voltride-notifications (main.py: orderId,
+        customerEmail, customerName, items[].productId/quantity/
+        lineTotalCents, grandTotalCents, estimatedDeliveryDays) — any drift
+        fails every checkout with a 422 at the final hop. Severity for an
+        unaccompanied contract change is CRITICAL. Also verify the checkout
+        saga still releases the inventory reservation on every
+        post-reservation failure path.
+    - path: "clients.go"
+      instructions: >-
+        This file holds hand-maintained local structs for four producer
+        repos: voltride-cart (Cart), voltride-inventory (StockRecord,
+        ReservationResponse — the guard requires the exact status string
+        "reserved"), voltride-pricing (Quote — grandTotalCents is the amount
+        charged), and voltride-notifications (NotificationResponse). Go
+        decodes missing JSON keys silently as zero values, so flag any
+        struct-tag edit that drifts from what the producer repo actually
+        serves, and any producer-repo change discussion that does not update
+        the matching struct here.
+
+  labeling_instructions:
+    - label: "breaking-change"
+      instructions: >-
+        Apply when the PR changes any wire-format element this service
+        produces (order response, error bodies, or the confirmation payload
+        sent to voltride-notifications) that linked repositories depend on.
+    - label: "cross-repo-impact"
+      instructions: >-
+        Apply when a change here alters the runtime behavior of another
+        VoltRide repo, even if every payload still parses.
+
+  pre_merge_checks:
+    custom_checks:
+      - name: "Cross-repo contract compatibility"
+        mode: "error"
+        instructions: >-
+          FAIL this check if the PR modifies any wire-format element this
+          service produces (the order response, its 409/422 error bodies, or
+          the order-confirmation payload POSTed to voltride-notifications)
+          or drifts the local structs in clients.go away from what the
+          producer repos (voltride-cart, voltride-inventory,
+          voltride-pricing, voltride-notifications) actually serve.
+          Consumers live in linked repositories and CANNOT be fixed in this
+          PR, so a contract change may only PASS when the PR description
+          links coordinated pull requests in every affected repo, or the
+          change is demonstrably additive. Also FAIL if a checkout failure
+          path after a successful reservation no longer releases the
+          reservation.
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "AGENTS.md"
+  linked_repositories:
+    - repository: "coderabbit-demo/voltride-cart"
+      instructions: >-
+        Producer this repo consumes: GET /api/carts/:id (cartId, items with
+        productId/name/quantity/basePriceCents, promoCode) and
+        DELETE /api/carts/:id, decoded via the Cart struct in clients.go.
+    - repository: "coderabbit-demo/voltride-inventory"
+      instructions: >-
+        Producer this repo consumes: stock records (stockCount,
+        restockEtaDays) for delivery estimates and POST /api/reservations
+        (requires exact status "reserved"; 409 insufficient_stock body) plus
+        DELETE /api/reservations/:id for rollback, decoded in clients.go.
+    - repository: "coderabbit-demo/voltride-pricing"
+      instructions: >-
+        Producer this repo consumes: POST /api/quotes responses (lineItems,
+        grandTotalCents — the amount charged), decoded via the Quote struct
+        in clients.go. Go decodes missing keys silently as 0, so a renamed
+        money field silently produces $0.00 orders.
+    - repository: "coderabbit-demo/voltride-notifications"
+      instructions: >-
+        Consumer of this repo's order-confirmation payload: its strict
+        Pydantic OrderConfirmationRequest in main.py must match the body
+        built in clients.go sendOrderConfirmation exactly, or every checkout
+        422s at the final hop.
+    - repository: "coderabbit-demo/voltride-frontend"
+      instructions: >-
+        Consumer of this repo's order response and 409/422 error bodies
+        (src/api/orders.ts) for the checkout and confirmation pages.
